@@ -1,48 +1,51 @@
 // Narration: free local Kokoro voices and premium ElevenLabs voices, both returning the same
 // thing: one WAV, a timing for every word, and a loudness envelope for lip-sync.
 import { existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { Worker } from 'node:worker_threads'
 import { KOKORO_VOICES } from '../shared/starter.ts'
 import { pauseAfter, scriptHash, tokenize, wordWeight } from '../shared/timeline.ts'
 import { FPS, type Reel, type SceneSpec, type VoiceOption, type VoiceTrack, type WordTiming } from '../shared/types.ts'
 import { decodeAudio, resample, writeWav } from './audio/wav.ts'
 import { ensureDir, env, filePath, fileUrl } from './env.ts'
 import type { JobHandle } from './jobs.ts'
-
 const VOICE_SR = 24000
 
 // ---------- Kokoro (local, free) ----------
-interface KokoroAudio { audio: Float32Array; sampling_rate: number }
-interface Kokoro { generate(text: string, opts: { voice: string; speed?: number }): Promise<KokoroAudio> }
-let kokoro: Promise<Kokoro> | null = null
-const KOKORO_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX'
-function loadKokoro(): Promise<Kokoro> {
-  kokoro ??= (async () => {
-    // On a shared host the model sees every core of the machine, not the few this service owns, and
-    // starts a thread pool to match. Build it ourselves so the thread count can be capped (KOKORO_THREADS).
-    const tf = (await import('@huggingface/transformers')) as unknown as {
-      StyleTextToSpeech2Model: { from_pretrained(id: string, opts: Record<string, unknown>): Promise<unknown> }
-      AutoTokenizer: { from_pretrained(id: string): Promise<unknown> }
-    }
-    const mod = (await import('kokoro-js')) as unknown as { KokoroTTS: new (model: unknown, tokenizer: unknown) => Kokoro }
-    const threads = Math.max(1, Math.round(Number(process.env.KOKORO_THREADS)) || 2)
-    const [model, tokenizer] = await Promise.all([
-      tf.StyleTextToSpeech2Model.from_pretrained(KOKORO_ID, { dtype: 'q8', device: 'cpu', session_options: { intra_op_num_threads: threads, inter_op_num_threads: 1 } }),
-      tf.AutoTokenizer.from_pretrained(KOKORO_ID),
-    ])
-    return new mod.KokoroTTS(model, tokenizer)
-  })()
-  kokoro.catch(() => { kokoro = null })
-  return kokoro
+// The model lives in a worker thread (kokoro-worker.mjs) so recording never blocks web requests.
+interface KokoroRequest { id: number; text: string; voice: string }
+type KokoroReply = { id: number; audio: Float32Array; rate: number } | { id: number; error: string }
+let worker: Worker | null = null
+let nextId = 0
+const waiting = new Map<number, { resolve: (a: Float32Array) => void; reject: (e: Error) => void }>()
+
+function kokoroWorker(): Worker {
+  if (worker) return worker
+  const w = new Worker(new URL('./kokoro-worker.mjs', import.meta.url))
+  w.on('message', (m: KokoroReply) => {
+    const p = waiting.get(m.id)
+    if (!p) return
+    waiting.delete(m.id)
+    if ('error' in m) p.reject(new Error(m.error))
+    else p.resolve(m.rate === VOICE_SR ? m.audio : resample(m.audio, m.rate, VOICE_SR))
+  })
+  const fail = (e: Error) => {
+    if (worker === w) worker = null
+    for (const p of waiting.values()) p.reject(e)
+    waiting.clear()
+  }
+  w.on('error', fail)
+  w.on('exit', (code) => fail(new Error(`The voice model stopped unexpectedly (exit ${code})`)))
+  return (worker = w)
 }
 
 /** Kokoro runs one sentence at a time; serialise calls so two jobs never share the session. */
 let kokoroQueue: Promise<unknown> = Promise.resolve()
 function kokoroSay(text: string, voice: string): Promise<Float32Array> {
-  const run = kokoroQueue.then(async () => {
-    const tts = await loadKokoro()
-    const out = await tts.generate(text, { voice, speed: 1.06 })
-    return out.sampling_rate === VOICE_SR ? out.audio : resample(out.audio, out.sampling_rate, VOICE_SR)
-  })
+  const run = kokoroQueue.then(() => new Promise<Float32Array>((resolve, reject) => {
+    const id = ++nextId
+    waiting.set(id, { resolve, reject })
+    kokoroWorker().postMessage({ id, text, voice } satisfies KokoroRequest)
+  }))
   kokoroQueue = run.catch(() => undefined)
   return run
 }
@@ -221,7 +224,7 @@ export async function generateVoice(reel: Reel, h?: JobHandle): Promise<VoiceTra
   const scenes = reel.scenes
   if (!scenes.some((s) => tokenize(s.line).length)) throw new Error('The script is empty. Write the script before recording a voice.')
   const hash = scriptHash(scenes)
-  const voiceId = reel.settings.voiceId || KOKORO_VOICES[0].id
+  const voiceId = reel.settings.voiceId || (await primaryVoiceId())
   if (reel.voice && reel.voice.scriptHash === hash && reel.voice.voiceId === voiceId && reel.voice.voiceUrl && existsSync(filePath(reel.voice.voiceUrl.replace(/^\/files\//, '')))) return reel.voice
 
   const [provider, name] = voiceId.split(/:(.*)/s) as [string, string]
@@ -307,7 +310,12 @@ export async function elevenVoices(): Promise<{ voices: VoiceOption[]; error?: s
 export async function listVoices(): Promise<{ voices: VoiceOption[]; elevenError?: string }> {
   const eleven = await elevenVoices()
   const local = KOKORO_VOICES.map((v) => ({ ...v, previewUrl: `/api/voices/preview?id=${encodeURIComponent(v.id)}` }))
-  return { voices: [...local, ...eleven.voices], elevenError: eleven.error }
+  return { voices: [...eleven.voices, ...local], elevenError: eleven.error }
+}
+
+/** The voice "Automatic" stands for: the top premium voice when ElevenLabs is connected, otherwise the free default. */
+export async function primaryVoiceId(): Promise<string> {
+  return (await elevenVoices()).voices[0]?.id ?? KOKORO_VOICES[0].id
 }
 
 const SAMPLE_LINE = 'What if your whole week changed, because of one small idea? Here is how it starts.'

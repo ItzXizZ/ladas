@@ -19,7 +19,7 @@ import { ensureAudio, PRESETS, renderReel, type Preset } from './render.ts'
 import { editScene, writeScript } from './script.ts'
 import { bundleFor, db, getSettings, saveCharacter, saveReel, saveSettings } from './store.ts'
 import { customStory, recommendStories } from './stories.ts'
-import { kokoroPreview, listVoices } from './voice.ts'
+import { kokoroPreview, listVoices, primaryVoiceId } from './voice.ts'
 
 const app = express()
 app.set('trust proxy', 1)
@@ -87,7 +87,7 @@ app.put('/api/settings', route((req) => {
   const num = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d)
   return saveSettings({
     model: typeof b.model === 'string' ? b.model.trim().slice(0, 80) : cur.model,
-    defaultVoiceId: str(b.defaultVoiceId, 120) || cur.defaultVoiceId,
+    defaultVoiceId: typeof b.defaultVoiceId === 'string' ? str(b.defaultVoiceId, 120) : cur.defaultVoiceId,
     defaultStyle: STYLE_IDS.includes(b.defaultStyle as StyleId) ? (b.defaultStyle as StyleId) : cur.defaultStyle,
     reelSeconds: b.reelSeconds === 20 || b.reelSeconds === 30 || b.reelSeconds === 38 ? b.reelSeconds : cur.reelSeconds,
     captions: typeof b.captions === 'boolean' ? b.captions : cur.captions,
@@ -121,7 +121,7 @@ function startIngest(product: Product) {
       db.products.put({ ...product, status: 'failed', error: e instanceof Error ? e.message.split('\n')[0] : String(e) })
       throw e
     }
-  })
+  }, { heavy: true, key: `ingest:${product.id}` })
 }
 
 app.get('/api/products', route(() => [...db.products.all()].reverse()))
@@ -285,7 +285,7 @@ app.get('/api/reels', route(() => [...db.reels.all()].reverse().map((r) => ({
   productName: db.products.get(r.productId)?.brief.name ?? '', hook: r.story?.hook ?? '', scenes: r.scenes.length,
   coverUrl: r.renders[0]?.coverUrl, mp4Url: r.renders[0]?.mp4Url,
 }))))
-app.post('/api/reels', route((req) => {
+app.post('/api/reels', route(async (req) => {
   const product = need(db.products.get(str(req.body?.productId)), 'Product')
   const ids = charactersByIds(req.body?.characterIds).map((c) => c.id)
   const settings = getSettings()
@@ -296,6 +296,7 @@ app.post('/api/reels', route((req) => {
     style: STYLE_IDS.includes(req.body?.style) ? req.body.style : settings.defaultStyle, scenes: [], settings: defaultReelSettings(settings), renders: [],
   }
   reel.characterVersions = pinVersions(reel.characterIds)
+  reel.settings.voiceId ||= await primaryVoiceId()
   return db.reels.put(reel)
 }))
 app.get('/api/reels/:id', route((req) => requireReel(req)))
@@ -408,7 +409,7 @@ app.post('/api/reels/:id/scenes/:sceneId/photo', route((req) => {
 app.post('/api/reels/:id/voice', route((req) => {
   const reel = requireReel(req)
   if (!reel.scenes.length) throw new HttpError(400, 'Write the script first')
-  return { job: startJob('voice', async (h) => ensureAudio(reel.id, h)) }
+  return { job: startJob('voice', async (h) => ensureAudio(reel.id, h), { heavy: true, key: `voice:${reel.id}` }) }
 }))
 
 app.post('/api/reels/:id/renders', route((req) => {
@@ -416,7 +417,7 @@ app.post('/api/reels/:id/renders', route((req) => {
   if (!reel.scenes.length) throw new HttpError(400, 'Write the script first')
   const asked: unknown[] = Array.isArray(req.body?.presets) ? req.body.presets : ['reel']
   const presets = (Object.keys(PRESETS) as Preset[]).filter((p) => asked.includes(p))
-  return { job: startJob('render', async (h) => ({ renders: await renderReel(reel.id, presets, h), reel: db.reels.get(reel.id) })) }
+  return { job: startJob('render', async (h) => ({ renders: await renderReel(reel.id, presets, h), reel: db.reels.get(reel.id) }), { heavy: true, key: `render:${reel.id}` }) }
 }))
 
 app.get('/api/jobs/:id', route((req) => need(getJob(param(req, 'id')), 'Job')))

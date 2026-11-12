@@ -93,7 +93,8 @@ export const KOKORO_VOICES: VoiceOption[] = [
 
 export const DEFAULT_SETTINGS: AppSettings = {
   model: '',
-  defaultVoiceId: 'kokoro:af_heart',
+  /** Empty means Automatic: the top ElevenLabs voice when a key is set, otherwise the first free voice. */
+  defaultVoiceId: '',
   defaultStyle: 'cartoon',
   reelSeconds: 30,
   captions: true,

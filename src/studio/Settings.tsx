@@ -48,6 +48,7 @@ export function SettingsPage() {
           <Field label="Length"><Seg value={s.reelSeconds} options={[20, 30, 38] as const} onChange={(reelSeconds) => set({ reelSeconds })} labels={{ 20: '20 s', 30: '30 s', 38: '38 s' }} /></Field>
           <Field label="Voice">
             <select value={s.defaultVoiceId} onChange={(e) => set({ defaultVoiceId: e.target.value })}>
+              <option value="">Automatic · {status.elevenlabs.configured ? 'best premium voice' : 'free voice until an ElevenLabs key is added'}</option>
               {status.voices.map((v) => <option key={v.id} value={v.id}>{v.provider === 'elevenlabs' ? 'Premium' : 'Free'} · {v.name}</option>)}
             </select>
           </Field>

@@ -1,4 +1,4 @@
-# Reel Studio with everything the render pipeline needs: Node, Chromium (page capture + frame drawing) and ffmpeg.
+# Ladas with everything the render pipeline needs: Node, Chromium (page capture + frame drawing) and ffmpeg.
 FROM node:24-bookworm-slim
 
 RUN apt-get update \

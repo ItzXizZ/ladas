@@ -51,7 +51,7 @@ export function Home() {
     <div className="page">
       <section className="hero">
         <h1>Paste a website.<br />Get a story reel.</h1>
-        <p>Reel Studio reads your site, films it, and wraps the product demo in a short animated story with your own cast of characters.</p>
+        <p>Ladas reads your site, films it, and wraps the product demo in a short animated story with your own cast of characters.</p>
         <form className="hero-form" onSubmit={submit}>
           <input type="text" inputMode="url" placeholder="yourproduct.com" value={url} onChange={(e) => setUrl(e.target.value)} aria-label="Website address" autoFocus />
           <Button kind="primary" type="submit" busy={busy} disabled={!url.trim()}>Start a reel</Button>

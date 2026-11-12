@@ -1,4 +1,4 @@
-// Reel Studio as a long-running process: the API from app.ts plus the front end, on one port.
+// Ladas as a long-running process: the API from app.ts plus the front end, on one port.
 // `npm run dev` serves the front end through Vite, `npm start` serves the built dist/ folder.
 import express from 'express'
 import { existsSync } from 'node:fs'
@@ -27,7 +27,7 @@ if (env.prod && existsSync(join(ROOT, 'dist', 'index.html'))) {
 // The API can spend the keys in .env, so it stays on this machine unless HOST says otherwise
 // (a container host sets HOST=0.0.0.0 and SITE_PASSWORD).
 server.listen(env.port, env.host, () => {
-  console.log(`\n  Reel Studio is running at http://localhost:${env.port}   (listening on ${env.host})\n`)
+  console.log(`\n  Ladas is running at http://localhost:${env.port}   (listening on ${env.host})\n`)
   console.log(`  Claude: ${llmReady() ? 'key set' : 'no key (template stories and scripts)'}   ElevenLabs: ${env.elevenKey ? 'key set' : 'no key (free voices only)'}   ffmpeg: ${ffmpegPath() ? 'ready' : 'missing, run `npm run setup`'}`)
   console.log(`  Password gate: ${authRequired ? 'on' : 'off (set SITE_PASSWORD to turn it on)'}   Supabase: ${cloudInfo() ? 'on' : 'off (data stays on this disk)'}\n`)
 })

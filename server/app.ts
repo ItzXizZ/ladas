@@ -1,4 +1,4 @@
-// Reel Studio API: every endpoint, behind the password gate. server/index.ts serves it locally
+// Ladas API: every endpoint, behind the password gate. server/index.ts serves it locally
 // (with the front end) and api/index.ts serves it on Vercel.
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { rmSync, writeFileSync } from 'node:fs'

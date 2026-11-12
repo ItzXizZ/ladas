@@ -16,7 +16,7 @@ const FACES = [
 let ready: Promise<void> | null = null
 /** Resolves once every engine font is usable. Layout measures text, so nothing may draw before this. */
 export function loadFonts(): Promise<void> {
-  ready ??= Promise.all(FACES.map((f) => document.fonts.load(f, 'Reel Studio 0123')))
+  ready ??= Promise.all(FACES.map((f) => document.fonts.load(f, 'Ladas 0123')))
     .then(() => document.fonts.ready)
     .then(() => resetMeasure())
   return ready

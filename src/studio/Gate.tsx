@@ -48,7 +48,7 @@ export function Gate({ children }: { children: ReactNode }) {
       <form className="card card-pad" onSubmit={submit} style={{ width: 'min(380px, 100%)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <span className="brand-mark" aria-hidden><i /><i /><i /></span>
-          <h1 style={{ fontSize: 26, lineHeight: 1.05 }}>Reel Studio</h1>
+          <h1 style={{ fontSize: 26, lineHeight: 1.05 }}>Ladas</h1>
         </div>
         {me && !me.configured ? (
           <p className="field-hint">This site is closed: no password has been set on the server yet.</p>

@@ -18,11 +18,13 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     CHROME_PATH=/usr/bin/chromium \
     FFMPEG_PATH=/usr/bin/ffmpeg \
-    DATA_DIR=/app/data
+    DATA_DIR=/app/data \
+    KOKORO_THREADS=2
 
 RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
 # Render sets PORT (10000 by default); locally: docker run -p 5173:5173 -e PORT=5173 ...
 EXPOSE 10000
-CMD ["npm", "start"]
+# Run node directly (not through npm) so it is PID 1 and receives the host's shutdown signal, which lets it save pending data.
+CMD ["node", "--import", "tsx", "server/index.ts", "--prod"]

@@ -2,6 +2,7 @@
 // (with the front end) and api/index.ts serves it on Vercel.
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { rmSync, writeFileSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import { defaultReelSettings, newId } from '../shared/starter.ts'
 import { STYLE_IDS, type Cast, type CharacterRecord, type FootagePage, type Product, type ProductShot, type Reel, type ReelSettings, type SceneSpec, type ServerStatus, type Story, type StyleId } from '../shared/types.ts'
@@ -24,7 +25,11 @@ const app = express()
 app.set('trust proxy', 1)
 app.disable('x-powered-by')
 app.use(express.json({ limit: '4mb' }))
-app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
+// Also tells a restart apart from a hang: uptime resets when the process was replaced.
+app.get('/healthz', (_req, res) => {
+  const m = process.memoryUsage()
+  res.json({ ok: true, uptimeS: Math.round(process.uptime()), rssMB: Math.round(m.rss / 1048576), heapMB: Math.round(m.heapUsed / 1048576), cpus: availableParallelism() })
+})
 app.use(authRoutes)
 app.use('/api', requireAuth)
 // Anything that changes data may have written or removed files (photos, covers); mirror them soon after.

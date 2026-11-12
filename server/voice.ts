@@ -14,10 +14,22 @@ const VOICE_SR = 24000
 interface KokoroAudio { audio: Float32Array; sampling_rate: number }
 interface Kokoro { generate(text: string, opts: { voice: string; speed?: number }): Promise<KokoroAudio> }
 let kokoro: Promise<Kokoro> | null = null
+const KOKORO_ID = 'onnx-community/Kokoro-82M-v1.0-ONNX'
 function loadKokoro(): Promise<Kokoro> {
   kokoro ??= (async () => {
-    const mod = (await import('kokoro-js')) as unknown as { KokoroTTS: { from_pretrained(id: string, opts: Record<string, string>): Promise<Kokoro> } }
-    return mod.KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', { dtype: 'q8', device: 'cpu' })
+    // On a shared host the model sees every core of the machine, not the few this service owns, and
+    // starts a thread pool to match. Build it ourselves so the thread count can be capped (KOKORO_THREADS).
+    const tf = (await import('@huggingface/transformers')) as unknown as {
+      StyleTextToSpeech2Model: { from_pretrained(id: string, opts: Record<string, unknown>): Promise<unknown> }
+      AutoTokenizer: { from_pretrained(id: string): Promise<unknown> }
+    }
+    const mod = (await import('kokoro-js')) as unknown as { KokoroTTS: new (model: unknown, tokenizer: unknown) => Kokoro }
+    const threads = Math.max(1, Math.round(Number(process.env.KOKORO_THREADS)) || 2)
+    const [model, tokenizer] = await Promise.all([
+      tf.StyleTextToSpeech2Model.from_pretrained(KOKORO_ID, { dtype: 'q8', device: 'cpu', session_options: { intra_op_num_threads: threads, inter_op_num_threads: 1 } }),
+      tf.AutoTokenizer.from_pretrained(KOKORO_ID),
+    ])
+    return new mod.KokoroTTS(model, tokenizer)
   })()
   kokoro.catch(() => { kokoro = null })
   return kokoro

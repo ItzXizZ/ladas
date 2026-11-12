@@ -10,6 +10,14 @@ import { cloudInfo, restoreFiles, startCloud } from './cloud.ts'
 import { env, ffmpegPath, ROOT } from './env.ts'
 import { llmReady } from './llm.ts'
 
+// Leave a trace in the host's logs when the process dies or runs short of memory.
+process.on('uncaughtException', (e) => { console.error('[fatal] uncaught exception:', e) })
+process.on('unhandledRejection', (e) => { console.error('[fatal] unhandled rejection:', e) })
+setInterval(() => {
+  const rss = Math.round(process.memoryUsage().rss / 1048576)
+  if (rss > 700) console.log(`[mem] rss ${rss} MB`)
+}, 10_000).unref()
+
 // With Supabase configured, bring the saved footage, audio and renders back onto this disk first.
 await restoreFiles()
 startCloud()

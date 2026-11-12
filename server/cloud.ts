@@ -153,7 +153,11 @@ export function scheduleFileSync(delayMs = 2000) {
 export function startCloud() {
   if (!cloudEnabled) return
   setInterval(() => void syncFiles(), 30_000).unref()
-  const flush = () => { void Promise.all([queue, syncFiles()]).finally(() => process.exit(0)) }
+  // On a restart or deploy the host sends SIGTERM and gives a few seconds: send what is pending, then go.
+  const flush = () => {
+    setTimeout(() => process.exit(0), 8000).unref()
+    void Promise.all([queue, syncFiles()]).finally(() => process.exit(0))
+  }
   process.once('SIGTERM', flush)
   process.once('SIGINT', flush)
 }

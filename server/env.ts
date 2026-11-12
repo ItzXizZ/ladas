@@ -1,11 +1,13 @@
 import 'dotenv/config'
 import { existsSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-export const DATA = join(ROOT, 'data')
+/** DATA_DIR points at a persistent volume on a container host. Vercel only allows writing to the temp folder. */
+export const DATA = process.env.DATA_DIR?.trim() || (process.env.VERCEL ? join(tmpdir(), 'reel-studio-data') : join(ROOT, 'data'))
 /** Everything under here is served at /files. */
 export const FILES = join(DATA, 'files')
 export const DB = join(DATA, 'db')
@@ -18,6 +20,7 @@ export const env = {
   anthropicModel: clean(process.env.ANTHROPIC_MODEL),
   elevenKey: clean(process.env.ELEVENLABS_API_KEY),
   port: Number(clean(process.env.PORT)) || 5173,
+  host: clean(process.env.HOST) || '127.0.0.1',
   browserChannel: clean(process.env.BROWSER_CHANNEL),
   prod: process.argv.includes('--prod'),
 }

@@ -9,6 +9,7 @@ import { compileTimeline, toSrt } from '../shared/timeline.ts'
 import { FPS, H, W, type QcIssue, type QcReport, type Reel, type Render, type SceneSpec } from '../shared/types.ts'
 import { mixIsCurrent, mixLoudness, mixReel } from './audio/mix.ts'
 import { runFfmpeg } from './audio/wav.ts'
+import { internalCookie } from './auth.ts'
 import { launchBrowser, NAME_SHIM } from './browser.ts'
 import { ensureDir, env, ffmpegPath, filePath, fileUrl } from './env.ts'
 import type { JobHandle } from './jobs.ts'
@@ -28,6 +29,8 @@ const base = () => `http://127.0.0.1:${env.port}`
 async function openReelPage(browser: Browser, reelId: string, scale = 1): Promise<Page> {
   const ctx = await browser.newContext({ viewport: { width: Math.round(W * scale), height: Math.round(H * scale) }, deviceScaleFactor: 1 })
   await ctx.addInitScript(NAME_SHIM)
+  // The render page reads the reel from this server's own gated API.
+  await ctx.addCookies([{ ...internalCookie(), url: base() }])
   const page = await ctx.newPage()
   await page.goto(`${base()}/render?reel=${encodeURIComponent(reelId)}`, { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => window.__reel?.ready || window.__reel?.error, undefined, { timeout: 90_000 })

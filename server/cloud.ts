@@ -38,6 +38,9 @@ const enqueue = (what: string, run: () => Promise<unknown>) => {
   queue = queue.then(run).catch((e: unknown) => say(`${what}: ${e instanceof Error ? e.message : String(e)}`))
 }
 
+/** Resolves once every queued record write has been sent. */
+export const flushRecords = () => queue
+
 export function upsertRecords(collection: string, items: { id: string }[]) {
   if (!cloudEnabled || !items.length) return
   const body = JSON.stringify(items.map((data) => ({ collection, id: data.id, data, updated_at: new Date().toISOString() })))

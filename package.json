@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx server/index.ts",
     "setup": "node scripts/setup-ffmpeg.mjs",
+    "cloud:push": "tsx scripts/push-to-cloud.ts",
     "typecheck": "tsc",
     "build": "tsc && vite build",
     "start": "tsx server/index.ts --prod"

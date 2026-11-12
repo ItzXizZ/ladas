@@ -5,8 +5,10 @@ services:
     runtime: docker
     # Rendering needs RAM: 1 CPU / 2 GB is the smallest plan that holds up. Free and 512 MB plans will crash.
     plan: standard
-    healthCheckPath: /healthz
-    autoDeploy: true
+    # No healthCheckPath on purpose. While a reel renders, the single CPU is busy enough that a health check
+    # can time out, and Render restarts a service that fails it, which kills the render in progress.
+    # Manual deploys: every push would otherwise restart the site, and any running render, without warning.
+    autoDeploy: false
     envVars:
       - key: SITE_PASSWORD
         sync: false

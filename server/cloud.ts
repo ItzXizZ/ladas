@@ -3,7 +3,7 @@
 //   files    -> private Storage bucket `files` (mirror of data/files) footage, audio, covers, MP4s
 // The app still works on local disk exactly as before; this only mirrors it. Off unless both variables are set:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (the secret key from Project Settings -> API Keys. Never put it in the browser.)
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, sep } from 'node:path'
 import { FILES } from './env.ts'
 
@@ -14,6 +14,8 @@ const BUCKET = (process.env.SUPABASE_BUCKET ?? 'files').trim()
 export const cloudEnabled = url.length > 0 && key.length > 0
 const headers = (extra: Record<string, string> = {}) => ({ apikey: key, authorization: `Bearer ${key}`, ...extra })
 const say = (m: string) => console.log(`[cloud] ${m}`)
+/** A request that never answers would otherwise stall every later save or upload, so each one gets a deadline. */
+const timed = (bytes = 0) => AbortSignal.timeout(60_000 + Math.round(bytes / 100_000) * 1000)
 
 async function check(res: Response, what: string): Promise<Response> {
   if (res.ok) return res
@@ -25,7 +27,7 @@ async function check(res: Response, what: string): Promise<Response> {
 export async function loadRecords<T>(collection: string): Promise<T[]> {
   const out: T[] = []
   for (let offset = 0; ; offset += 1000) {
-    const res = await check(await fetch(`${url}/rest/v1/records?collection=eq.${encodeURIComponent(collection)}&select=data&order=seq.asc&limit=1000&offset=${offset}`, { headers: headers() }), `read ${collection}`)
+    const res = await check(await fetch(`${url}/rest/v1/records?collection=eq.${encodeURIComponent(collection)}&select=data&order=seq.asc&limit=1000&offset=${offset}`, { headers: headers(), signal: timed() }), `read ${collection}`)
     const rows = (await res.json()) as { data: T }[]
     out.push(...rows.map((r) => r.data))
     if (rows.length < 1000) return out
@@ -45,20 +47,26 @@ export function upsertRecords(collection: string, items: { id: string }[]) {
   if (!cloudEnabled || !items.length) return
   const body = JSON.stringify(items.map((data) => ({ collection, id: data.id, data, updated_at: new Date().toISOString() })))
   enqueue(`save ${collection}`, async () => {
-    await check(await fetch(`${url}/rest/v1/records?on_conflict=collection,id`, { method: 'POST', headers: headers({ 'content-type': 'application/json', prefer: 'resolution=merge-duplicates,return=minimal' }), body }), `save ${collection}`)
+    await check(await fetch(`${url}/rest/v1/records?on_conflict=collection,id`, { method: 'POST', headers: headers({ 'content-type': 'application/json', prefer: 'resolution=merge-duplicates,return=minimal' }), body, signal: timed(body.length) }), `save ${collection}`)
   })
 }
 
 export function deleteRecord(collection: string, id: string) {
   if (!cloudEnabled) return
   enqueue(`delete ${collection}`, async () => {
-    await check(await fetch(`${url}/rest/v1/records?collection=eq.${encodeURIComponent(collection)}&id=eq.${encodeURIComponent(id)}`, { method: 'DELETE', headers: headers() }), `delete ${collection}`)
+    await check(await fetch(`${url}/rest/v1/records?collection=eq.${encodeURIComponent(collection)}&id=eq.${encodeURIComponent(id)}`, { method: 'DELETE', headers: headers(), signal: timed() }), `delete ${collection}`)
   })
 }
 
 // ---------- Files ----------
 const objectUrl = (path: string) => `${url}/storage/v1/object/${BUCKET}/${path.split('/').map(encodeURIComponent).join('/')}`
 const toKey = (abs: string) => relative(FILES, abs).split(sep).join('/')
+
+// Storage rejects single uploads above the project's size limit (50 MB by default), so bigger files
+// (rendered MP4s) are stored as `<key>.part-<i>-of-<n>` and joined again on restore.
+const PART_BYTES = 40 * 1024 * 1024
+const PART_RE = /^(.+)\.part-(\d+)-of-(\d+)$/
+const partNames = (k: string, n: number) => (n === 1 ? [k] : Array.from({ length: n }, (_, i) => `${k}.part-${i + 1}-of-${n}`))
 
 function walkLocal(dir: string, out: string[] = []): string[] {
   if (!existsSync(dir)) return out
@@ -72,7 +80,7 @@ function walkLocal(dir: string, out: string[] = []): string[] {
 
 async function listRemote(prefix = '', out: string[] = []): Promise<string[]> {
   for (let offset = 0; ; offset += 100) {
-    const res = await check(await fetch(`${url}/storage/v1/object/list/${BUCKET}`, { method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify({ prefix, limit: 100, offset, sortBy: { column: 'name', order: 'asc' } }) }), 'list files')
+    const res = await check(await fetch(`${url}/storage/v1/object/list/${BUCKET}`, { method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify({ prefix, limit: 100, offset, sortBy: { column: 'name', order: 'asc' } }), signal: timed() }), 'list files')
     const rows = (await res.json()) as { name: string; id: string | null }[]
     for (const r of rows) {
       const path = prefix ? `${prefix}/${r.name}` : r.name
@@ -85,24 +93,76 @@ async function listRemote(prefix = '', out: string[] = []): Promise<string[]> {
 
 /** What the bucket is known to hold: key -> "size:mtime" of the local file it was uploaded from. */
 const synced = new Map<string, string>()
+/** The bucket objects each key is stored as (one name, or its parts). */
+const stored = new Map<string, string[]>()
+/** Uploads that failed, so a file that keeps failing is retried every few minutes rather than every pass. */
+const failed = new Map<string, { sig: string; at: number }>()
+const RETRY_MS = 5 * 60_000
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-/** Pulls everything from the bucket that this disk is missing. Run once at start-up. */
+async function download(name: string): Promise<Buffer> {
+  const res = await check(await fetch(objectUrl(name), { headers: headers(), signal: timed(PART_BYTES) }), `download ${name}`)
+  return Buffer.from(await res.arrayBuffer())
+}
+
+async function upload(k: string, path: string): Promise<void> {
+  const data = readFileSync(path)
+  const names = partNames(k, Math.max(1, Math.ceil(data.length / PART_BYTES)))
+  for (const [i, name] of names.entries()) {
+    const body = names.length === 1 ? data : data.subarray(i * PART_BYTES, (i + 1) * PART_BYTES)
+    await check(await fetch(objectUrl(name), { method: 'POST', headers: headers({ 'x-upsert': 'true', 'content-type': 'application/octet-stream' }), body, signal: timed(body.length) }), `upload ${name}`)
+  }
+  const stale = (stored.get(k) ?? []).filter((n) => !names.includes(n))
+  if (stale.length) await removeRemote(stale)
+  stored.set(k, names)
+}
+
+async function removeRemote(names: string[]): Promise<void> {
+  for (let i = 0; i < names.length; i += 100) {
+    await check(await fetch(`${url}/storage/v1/object/${BUCKET}`, { method: 'DELETE', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify({ prefixes: names.slice(i, i + 100) }), signal: timed() }), 'delete files')
+  }
+}
+
+/** Pulls everything from the bucket that this disk is missing. Run once at start-up; never throws. */
 export async function restoreFiles(): Promise<void> {
   if (!cloudEnabled) return
-  const keys = await listRemote()
-  let got = 0
-  for (const k of keys) {
-    const dest = join(FILES, ...k.split('/'))
-    if (!existsSync(dest)) {
-      const res = await check(await fetch(objectUrl(k), { headers: headers() }), `download ${k}`)
-      mkdirSync(dirname(dest), { recursive: true })
-      writeFileSync(dest, Buffer.from(await res.arrayBuffer()))
-      got++
-    }
-    const st = statSync(dest)
-    synced.set(k, `${st.size}:${Math.round(st.mtimeMs)}`)
+  let names: string[]
+  try {
+    names = await listRemote()
+  } catch (e) {
+    say(`file restore skipped: ${message(e)}`)
+    return
   }
-  say(`files restored: ${got} downloaded, ${keys.length - got} already on disk`)
+  const groups = new Map<string, string[]>()
+  for (const name of names) {
+    const k = PART_RE.exec(name)?.[1] ?? name
+    groups.set(k, [...(groups.get(k) ?? []), name])
+  }
+  let got = 0
+  let bad = 0
+  for (const [k, have] of groups) {
+    stored.set(k, have)
+    const total = Number(have.map((n) => PART_RE.exec(n)?.[3]).find(Boolean) ?? 1)
+    const want = have.includes(k) ? [k] : partNames(k, total)
+    const dest = join(FILES, ...k.split('/'))
+    try {
+      if (!existsSync(dest)) {
+        if (!want.every((n) => have.includes(n))) throw new Error(`only ${have.length} of ${want.length} parts are stored`)
+        const parts: Buffer[] = []
+        for (const n of want) parts.push(await download(n))
+        mkdirSync(dirname(dest), { recursive: true })
+        writeFileSync(dest + '.tmp', Buffer.concat(parts))
+        renameSync(dest + '.tmp', dest)
+        got++
+      }
+      const st = statSync(dest)
+      synced.set(k, `${st.size}:${Math.round(st.mtimeMs)}`)
+    } catch (e) {
+      bad++
+      say(`restore ${k}: ${message(e)}`)
+    }
+  }
+  say(`files restored: ${got} downloaded, ${groups.size - got - bad} already on disk${bad ? `, ${bad} failed` : ''}`)
 }
 
 let syncing: Promise<void> | null = null
@@ -116,23 +176,33 @@ export function syncFiles(): Promise<void> {
     try {
       const local = new Map(walkLocal(FILES).map((p) => [toKey(p), p]))
       let up = 0
+      let errors = 0
       for (const [k, p] of local) {
-        const st = statSync(p)
+        const st = statSync(p, { throwIfNoEntry: false })
+        if (!st) continue
         const sig = `${st.size}:${Math.round(st.mtimeMs)}`
         if (synced.get(k) === sig) continue
-        await check(await fetch(objectUrl(k), { method: 'POST', headers: headers({ 'x-upsert': 'true', 'content-type': 'application/octet-stream' }), body: readFileSync(p) }), `upload ${k}`)
-        synced.set(k, sig)
-        up++
+        const f = failed.get(k)
+        if (f && f.sig === sig && Date.now() - f.at < RETRY_MS) continue
+        try {
+          await upload(k, p)
+          synced.set(k, sig)
+          failed.delete(k)
+          up++
+        } catch (e) {
+          failed.set(k, { sig, at: Date.now() })
+          errors++
+          say(`upload ${k}: ${message(e)}`)
+        }
       }
       const gone = [...synced.keys()].filter((k) => !local.has(k))
-      for (let i = 0; i < gone.length; i += 100) {
-        const batch = gone.slice(i, i + 100)
-        await check(await fetch(`${url}/storage/v1/object/${BUCKET}`, { method: 'DELETE', headers: headers({ 'content-type': 'application/json' }), body: JSON.stringify({ prefixes: batch }) }), 'delete files')
-        for (const k of batch) synced.delete(k)
+      if (gone.length) {
+        await removeRemote(gone.flatMap((k) => stored.get(k) ?? [k]))
+        for (const k of gone) { synced.delete(k); stored.delete(k) }
       }
-      if (up || gone.length) say(`files synced: ${up} uploaded, ${gone.length} removed`)
+      if (up || gone.length || errors) say(`files synced: ${up} uploaded, ${gone.length} removed${errors ? `, ${errors} failed` : ''}`)
     } catch (e) {
-      say(`file sync: ${e instanceof Error ? e.message : String(e)}`)
+      say(`file sync: ${message(e)}`)
     } finally {
       syncing = null
       if (again) { again = false; void syncFiles() }

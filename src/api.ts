@@ -2,16 +2,35 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Job } from '../shared/types.ts'
 
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
+/** The server is restarting or too busy to answer: 502, 503, 504 from the host, or no response at all. */
+const UNAVAILABLE = 'The server is not answering right now. It may be restarting; wait a minute and try again.'
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  })
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  } catch {
+    throw new ApiError(0, UNAVAILABLE)
+  }
   const text = await res.text()
   let data: unknown = null
   try { data = text ? JSON.parse(text) : null } catch { /* not JSON */ }
-  if (!res.ok) throw new Error((data as { error?: string } | null)?.error ?? `Request failed (${res.status})`)
+  if (!res.ok) {
+    const fromServer = (data as { error?: string } | null)?.error
+    throw new ApiError(res.status, fromServer ?? (res.status >= 502 && res.status <= 504 ? UNAVAILABLE : `Request failed (${res.status})`))
+  }
   return data as T
 }
 export const get = <T,>(path: string) => api<T>('GET', path)
@@ -48,10 +67,12 @@ export function useJob<T = unknown>(key: string, onDone?: (result: T) => void): 
     if (!id) { setJob(null); return }
     let stop = false
     let timer = 0
+    let unreachableSince = 0
     const poll = async () => {
       try {
         const j = await get<Job>(`/api/jobs/${id}`)
         if (stop) return
+        unreachableSince = 0
         setJob(j)
         if (j.status === 'running') timer = window.setTimeout(poll, 800)
         else {
@@ -63,9 +84,15 @@ export function useJob<T = unknown>(key: string, onDone?: (result: T) => void): 
         }
       } catch (e) {
         if (stop) return
+        const status = e instanceof ApiError ? e.status : 0
+        // A busy or restarting server misses a few polls; keep following the job for a few minutes.
+        if ((status === 0 || status >= 500) && Date.now() - (unreachableSince ||= Date.now()) < 4 * 60_000) {
+          timer = window.setTimeout(poll, 3000)
+          return
+        }
         running.delete(key)
         setJob(null)
-        setError(errorText(e))
+        setError(status === 404 ? 'The server restarted and this job was lost. Start it again.' : errorText(e))
       }
     }
     void poll()

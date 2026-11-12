@@ -1,7 +1,7 @@
 // The renderer: the same page the preview uses is stepped frame by frame in headless Chrome,
 // screenshotted, and encoded with the mastered audio. QC runs before and after.
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { availableParallelism } from 'node:os'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright-core'
 import { newId } from '../shared/starter.ts'
@@ -11,11 +11,12 @@ import { mixIsCurrent, mixLoudness, mixReel } from './audio/mix.ts'
 import { runFfmpeg } from './audio/wav.ts'
 import { internalCookie } from './auth.ts'
 import { launchBrowser, NAME_SHIM } from './browser.ts'
-import { ensureDir, env, ffmpegPath, filePath, fileUrl } from './env.ts'
+import { DATA, ensureDir, env, ffmpegPath, filePath, fileUrl } from './env.ts'
 import type { JobHandle } from './jobs.ts'
+import { containerMemory } from './memory.ts'
 import { audioQc, geometryQc, syncQc, visionQc } from './qc.ts'
 import { db, getSettings, saveReel } from './store.ts'
-import { generateVoice } from './voice.ts'
+import { generateVoice, releaseVoiceModel } from './voice.ts'
 
 export type Preset = Render['preset']
 export const PRESETS: Record<Preset, { width: number; height: number; label: string }> = {
@@ -25,6 +26,29 @@ export const PRESETS: Record<Preset, { width: number; height: number; label: str
 }
 
 const base = () => `http://127.0.0.1:${env.port}`
+
+/** Frames go on the data disk: a host's temp folder can be RAM-backed and count against its memory limit.
+ * Anything here at start-up is left over from a render that a restart cut short. */
+const FRAMES = join(DATA, 'frames')
+rmSync(FRAMES, { recursive: true, force: true })
+mkdirSync(FRAMES, { recursive: true })
+
+/** A page is replaced after this many frames, which hands its memory back. */
+const RECYCLE_FRAMES = 150
+/** Share of the container's memory at which a page is replaced early, and at which one page stops for good. */
+const MEMORY_RECYCLE = 0.7
+const MEMORY_DROP = 0.82
+/** What one full-size render page plus its share of the browser needs, and what the rest of the service keeps. */
+const PAGE_MB = 450
+const BASE_MB = 1000
+
+/** The configured page count, lowered to what this host's memory can hold. */
+function renderWorkers(setting: number, total: number): number {
+  const wanted = Math.max(1, Math.min(8, Math.round(setting) || 2, total))
+  const mem = containerMemory()
+  if (!mem) return wanted
+  return Math.max(1, Math.min(wanted, Math.floor((mem.limitMB - BASE_MB) / PAGE_MB)))
+}
 
 async function openReelPage(browser: Browser, reelId: string, scale = 1): Promise<Page> {
   const ctx = await browser.newContext({ viewport: { width: Math.round(W * scale), height: Math.round(H * scale) }, deviceScaleFactor: 1 })
@@ -100,9 +124,11 @@ export async function renderReel(reelId: string, presets: Preset[], h: JobHandle
 
   h.step(0.01, 'Preparing the voice')
   await ensureAudio(reelId, sub(h, 0.01, 0.16))
+  // The free voice model holds a few hundred MB that the browser needs more from here on.
+  await releaseVoiceModel()
 
   const browser = await launchBrowser()
-  const tmp = mkdtempSync(join(tmpdir(), 'reel-studio-'))
+  const tmp = mkdtempSync(join(FRAMES, 'render-'))
   try {
     // 1. Geometry QC with automatic fixes, on a half-size page (layout is identical at any size).
     h.step(0.17, 'Checking the layout')
@@ -122,28 +148,60 @@ export async function renderReel(reelId: string, presets: Preset[], h: JobHandle
     const tl = compileTimeline(reel)
     const total = tl.totalFrames
 
-    // 2. Frames.
-    const workers = Math.max(1, Math.min(8, Math.round(settings.renderWorkers) || 4, total))
+    // 2. Frames. Each page grows as it draws (decoded footage, layout caches), and the host kills the whole
+    // service at its memory limit, so pages are replaced regularly and dropped when memory runs short.
+    const workers = renderWorkers(settings.renderWorkers, total)
     h.step(0.24, `Drawing ${total} frames`)
-    const pages = await Promise.all(Array.from({ length: workers }, () => openReelPage(browser, reelId)))
+    if (workers < Math.round(settings.renderWorkers)) h.log(`Drawing with ${workers} page${workers === 1 ? '' : 's'} to stay within this server's memory`)
     const framePath = (n: number) => join(tmp, `f${String(n).padStart(6, '0')}.jpg`)
     let next = 0
     let done = 0
     let lastReport = 0
-    await Promise.all(pages.map(async (p) => {
-      for (;;) {
-        const n = next++
-        if (n >= total) return
-        await p.evaluate((f) => window.__reel!.setFrame(f), n)
-        await p.screenshot({ path: framePath(n), type: 'jpeg', quality: 94 })
-        done++
-        if (Date.now() - lastReport > 700) {
-          lastReport = Date.now()
-          h.step(0.24 + 0.56 * (done / total), `Drawing frame ${done} of ${total}`)
+    let active = workers
+    await Promise.all(Array.from({ length: workers }, async () => {
+      let p = await openReelPage(browser, reelId)
+      let drawn = 0
+      try {
+        for (;;) {
+          const mem = containerMemory()?.pressure ?? 0
+          if (mem > MEMORY_DROP && active > 1) {
+            active--
+            h.log(`Memory is running short, continuing with ${active} page${active === 1 ? '' : 's'}`)
+            return
+          }
+          if (drawn >= RECYCLE_FRAMES || (mem > MEMORY_RECYCLE && drawn >= 20)) {
+            await p.context().close()
+            p = await openReelPage(browser, reelId)
+            drawn = 0
+          }
+          const n = next++
+          if (n >= total) return
+          const draw = async () => {
+            await p.evaluate((f) => window.__reel!.setFrame(f), n)
+            await p.screenshot({ path: framePath(n), type: 'jpeg', quality: 94 })
+          }
+          try {
+            await draw()
+          } catch (e) {
+            // A crashed page (usually memory) gets one fresh replacement before the render gives up.
+            h.log(`Frame ${n} failed (${e instanceof Error ? e.message.split('\n')[0] : String(e)}), retrying on a new page`)
+            await p.context().close().catch(() => undefined)
+            p = await openReelPage(browser, reelId)
+            drawn = 0
+            await draw()
+          }
+          drawn++
+          done++
+          if (Date.now() - lastReport > 700) {
+            lastReport = Date.now()
+            h.step(0.24 + 0.56 * (done / total), `Drawing frame ${done} of ${total}`)
+          }
         }
+      } finally {
+        await p.context().close().catch(() => undefined)
       }
     }))
-    await Promise.all(pages.map((p) => p.context().close()))
+    if (done < total) throw new Error(`Only ${done} of ${total} frames were drawn`)
 
     // 3. Encode each preset.
     const renderId = newId('render')
@@ -158,6 +216,8 @@ export async function renderReel(reelId: string, presets: Preset[], h: JobHandle
       args.push('-filter_complex', videoFilter(preset), '-map', '[v]')
       if (audio) args.push('-map', '1:a', '-c:a', 'copy')
       args.push(
+        // ffmpeg sizes its thread pool (and its memory) by the host machine's cores, not the few this service owns.
+        '-threads', String(Math.min(4, Math.max(2, availableParallelism()))),
         '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-profile:v', 'high', '-r', String(FPS), '-g', String(FPS * 2),
         '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', '-color_range', 'tv',
         '-x264-params', 'colorprim=bt709:transfer=bt709:colormatrix=bt709',

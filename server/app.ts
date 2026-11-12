@@ -10,10 +10,11 @@ import { browserName } from './browser.ts'
 import { describeCharacter, sanitizeCharacter } from './characters.ts'
 import { mixIsCurrent } from './audio/mix.ts'
 import { authRoutes, requireAuth } from './auth.ts'
-import { scheduleFileSync } from './cloud.ts'
+import { scheduleFileSync, syncStatus } from './cloud.ts'
 import { ensureDir, env, ffmpegPath, filePath, fileUrl, FILES } from './env.ts'
 import { ingestProduct, linkFeatures, normalizeUrl } from './ingest.ts'
 import { getJob, startJob } from './jobs.ts'
+import { containerMemory } from './memory.ts'
 import { listModels, llmReady, pickModel } from './llm.ts'
 import { ensureAudio, PRESETS, renderReel, type Preset } from './render.ts'
 import { editScene, writeScript } from './script.ts'
@@ -28,7 +29,7 @@ app.use(express.json({ limit: '4mb' }))
 // Also tells a restart apart from a hang: uptime resets when the process was replaced.
 app.get('/healthz', (_req, res) => {
   const m = process.memoryUsage()
-  res.json({ ok: true, uptimeS: Math.round(process.uptime()), rssMB: Math.round(m.rss / 1048576), heapMB: Math.round(m.heapUsed / 1048576), cpus: availableParallelism() })
+  res.json({ ok: true, uptimeS: Math.round(process.uptime()), rssMB: Math.round(m.rss / 1048576), heapMB: Math.round(m.heapUsed / 1048576), cpus: availableParallelism(), container: containerMemory(), fileSync: syncStatus() })
 })
 app.use(authRoutes)
 app.use('/api', requireAuth)

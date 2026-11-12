@@ -167,49 +167,63 @@ export async function restoreFiles(): Promise<void> {
 
 let syncing: Promise<void> | null = null
 let again = false
+const status = { lastSyncAt: 0, lastUploadAt: 0, uploaded: 0, failing: 0, lastError: '' }
 
 /** Uploads new or changed files and removes ones deleted locally. Safe to call often. */
 export function syncFiles(): Promise<void> {
   if (!cloudEnabled) return Promise.resolve()
   if (syncing) { again = true; return syncing }
-  syncing = (async () => {
-    try {
-      const local = new Map(walkLocal(FILES).map((p) => [toKey(p), p]))
-      let up = 0
-      let errors = 0
-      for (const [k, p] of local) {
-        const st = statSync(p, { throwIfNoEntry: false })
-        if (!st) continue
-        const sig = `${st.size}:${Math.round(st.mtimeMs)}`
-        if (synced.get(k) === sig) continue
-        const f = failed.get(k)
-        if (f && f.sig === sig && Date.now() - f.at < RETRY_MS) continue
-        try {
-          await upload(k, p)
-          synced.set(k, sig)
-          failed.delete(k)
-          up++
-        } catch (e) {
-          failed.set(k, { sig, at: Date.now() })
-          errors++
-          say(`upload ${k}: ${message(e)}`)
-        }
-      }
-      const gone = [...synced.keys()].filter((k) => !local.has(k))
-      if (gone.length) {
-        await removeRemote(gone.flatMap((k) => stored.get(k) ?? [k]))
-        for (const k of gone) { synced.delete(k); stored.delete(k) }
-      }
-      if (up || gone.length || errors) say(`files synced: ${up} uploaded, ${gone.length} removed${errors ? `, ${errors} failed` : ''}`)
-    } catch (e) {
-      say(`file sync: ${message(e)}`)
-    } finally {
-      syncing = null
-      if (again) { again = false; void syncFiles() }
-    }
-  })()
+  // A pass with nothing to do finishes synchronously, so the reset has to happen in a later tick than this assignment.
+  syncing = syncPass().finally(() => {
+    syncing = null
+    if (again) { again = false; void syncFiles() }
+  })
   return syncing
 }
+
+async function syncPass(): Promise<void> {
+  try {
+    const local = new Map(walkLocal(FILES).map((p) => [toKey(p), p]))
+    let up = 0
+    let errors = 0
+    for (const [k, p] of local) {
+      const st = statSync(p, { throwIfNoEntry: false })
+      if (!st) continue
+      const sig = `${st.size}:${Math.round(st.mtimeMs)}`
+      if (synced.get(k) === sig) continue
+      const f = failed.get(k)
+      if (f && f.sig === sig && Date.now() - f.at < RETRY_MS) continue
+      try {
+        await upload(k, p)
+        synced.set(k, sig)
+        failed.delete(k)
+        up++
+      } catch (e) {
+        failed.set(k, { sig, at: Date.now() })
+        errors++
+        status.lastError = `upload ${k}: ${message(e)}`
+        say(status.lastError)
+      }
+    }
+    const gone = [...synced.keys()].filter((k) => !local.has(k))
+    if (gone.length) {
+      await removeRemote(gone.flatMap((k) => stored.get(k) ?? [k]))
+      for (const k of gone) { synced.delete(k); stored.delete(k) }
+    }
+    if (up || gone.length || errors) say(`files synced: ${up} uploaded, ${gone.length} removed${errors ? `, ${errors} failed` : ''}`)
+    status.uploaded += up
+    if (up) status.lastUploadAt = Date.now()
+  } catch (e) {
+    status.lastError = message(e)
+    say(`file sync: ${status.lastError}`)
+  } finally {
+    status.lastSyncAt = Date.now()
+    status.failing = failed.size
+  }
+}
+
+/** For /healthz: proves the mirror is still moving. */
+export const syncStatus = () => (cloudEnabled ? { ...status, syncing: !!syncing, known: synced.size } : null)
 
 let timer: NodeJS.Timeout | undefined
 /** Debounced: call after anything that writes to data/files. */

@@ -40,14 +40,30 @@ function kokoroWorker(): Worker {
 
 /** Kokoro runs one sentence at a time; serialise calls so two jobs never share the session. */
 let kokoroQueue: Promise<unknown> = Promise.resolve()
+let idleTimer: NodeJS.Timeout | undefined
 function kokoroSay(text: string, voice: string): Promise<Float32Array> {
+  clearTimeout(idleTimer)
   const run = kokoroQueue.then(() => new Promise<Float32Array>((resolve, reject) => {
     const id = ++nextId
     waiting.set(id, { resolve, reject })
     kokoroWorker().postMessage({ id, text, voice } satisfies KokoroRequest)
   }))
   kokoroQueue = run.catch(() => undefined)
+  void kokoroQueue.then(() => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => void releaseVoiceModel(), 2 * 60_000)
+    idleTimer.unref()
+  })
   return run
+}
+
+/** Unloads the free voice model to hand its memory back. It loads again on the next recording. */
+export async function releaseVoiceModel(): Promise<void> {
+  clearTimeout(idleTimer)
+  await kokoroQueue
+  const w = worker
+  worker = null
+  if (w) await w.terminate()
 }
 
 /** First and last sample above the noise floor. */

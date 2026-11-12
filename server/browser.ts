@@ -8,7 +8,7 @@ let working: string | null | undefined
 export async function launchBrowser(): Promise<Browser> {
   // A container ships its own Chromium; CHROME_PATH points at it. There is no sandbox support inside a container.
   if (env.chromePath) {
-    const browser = await chromium.launch({ executablePath: env.chromePath, headless: true, args: ['--force-color-profile=srgb', '--hide-scrollbars', '--no-sandbox', '--disable-dev-shm-usage'] })
+    const browser = await chromium.launch({ executablePath: env.chromePath, headless: true, args: ['--force-color-profile=srgb', '--hide-scrollbars', '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--mute-audio'] })
     working = 'chromium'
     return browser
   }

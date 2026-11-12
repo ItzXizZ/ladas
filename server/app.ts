@@ -38,6 +38,8 @@ app.use('/api', (req, res, next) => {
   next()
 })
 app.use('/files', requireAuth, express.static(FILES, { maxAge: '1h' }))
+// Without this a missing file falls through to the front end's index.html, which browsers then cache as the image.
+app.use('/files', (_req, res) => { res.status(404).set('Cache-Control', 'no-store').end() })
 
 class HttpError extends Error {
   status: number

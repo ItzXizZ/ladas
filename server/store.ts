@@ -1,27 +1,42 @@
 // File-backed store: one JSON file per collection. Single user, single process, so a write-through
 // cache with atomic replace is enough. Every record is plain data that maps 1:1 to shared/types.
+// With Supabase configured (see cloud.ts) every change is mirrored there and the records are read
+// back from it at start-up, so the data outlives the host's disk.
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_SETTINGS, STARTER_CASTS, STARTER_CHARACTERS } from '../shared/starter.ts'
 import type { AppSettings, Cast, CharacterRecord, Product, Reel, ReelBundle } from '../shared/types.ts'
+import { cloudEnabled, deleteRecord, loadRecords, upsertRecords } from './cloud.ts'
 import { DB } from './env.ts'
 
 class Collection<T extends { id: string }> {
   private items: T[]
   private file: string
-  constructor(name: string, seed: T[] = []) {
+  private name: string
+  private constructor(name: string, items: T[]) {
+    this.name = name
     this.file = join(DB, `${name}.json`)
-    if (existsSync(this.file)) {
+    this.items = items
+    this.flush()
+  }
+  /** Cloud records win when there are any; otherwise the local file; otherwise the seed. */
+  static async open<T extends { id: string }>(name: string, seed: T[] = []): Promise<Collection<T>> {
+    const file = join(DB, `${name}.json`)
+    let local: T[] | undefined
+    if (existsSync(file)) {
       try {
-        this.items = JSON.parse(readFileSync(this.file, 'utf8')) as T[]
+        local = JSON.parse(readFileSync(file, 'utf8')) as T[]
       } catch (e) {
         // Never silently replace a corrupt database with seed data.
-        throw new Error(`Could not read ${this.file}: ${String(e)}. Fix or remove the file and restart.`)
+        throw new Error(`Could not read ${file}: ${String(e)}. Fix or remove the file and restart.`)
       }
-    } else {
-      this.items = seed
-      this.flush()
     }
+    if (!cloudEnabled) return new Collection<T>(name, local ?? seed)
+    const remote = await loadRecords<T>(name)
+    if (remote.length) return new Collection<T>(name, remote)
+    const items = local ?? seed
+    upsertRecords(name, items)
+    return new Collection<T>(name, items)
   }
   private flush() {
     const tmp = this.file + '.tmp'
@@ -39,12 +54,16 @@ class Collection<T extends { id: string }> {
     if (i >= 0) this.items[i] = item
     else this.items.push(item)
     this.flush()
+    upsertRecords(this.name, [item])
     return item
   }
   remove(id: string): boolean {
     const n = this.items.length
     this.items = this.items.filter((i) => i.id !== id)
-    if (this.items.length !== n) this.flush()
+    if (this.items.length !== n) {
+      this.flush()
+      deleteRecord(this.name, id)
+    }
     return this.items.length !== n
   }
 }
@@ -52,13 +71,13 @@ class Collection<T extends { id: string }> {
 type Versioned = CharacterRecord & { id: string }
 
 export const db = {
-  products: new Collection<Product>('products'),
-  characters: new Collection<CharacterRecord>('characters', STARTER_CHARACTERS),
+  products: await Collection.open<Product>('products'),
+  characters: await Collection.open<CharacterRecord>('characters', STARTER_CHARACTERS),
   /** Every past version of every character, keyed `${id}@${version}`. */
-  characterHistory: new Collection<Versioned>('character-history'),
-  casts: new Collection<Cast>('casts', STARTER_CASTS),
-  reels: new Collection<Reel>('reels'),
-  settings: new Collection<AppSettings & { id: string }>('settings', [{ id: 'app', ...DEFAULT_SETTINGS }]),
+  characterHistory: await Collection.open<Versioned>('character-history'),
+  casts: await Collection.open<Cast>('casts', STARTER_CASTS),
+  reels: await Collection.open<Reel>('reels'),
+  settings: await Collection.open<AppSettings & { id: string }>('settings', [{ id: 'app', ...DEFAULT_SETTINGS }]),
 }
 
 export function getSettings(): AppSettings {

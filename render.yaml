@@ -1,0 +1,20 @@
+# Render Blueprint: one Docker web service. Secrets (sync: false) are asked for in the dashboard, never stored here.
+services:
+  - type: web
+    name: reel-studio
+    runtime: docker
+    # Rendering needs RAM: 1 CPU / 2 GB is the smallest plan that holds up. Free and 512 MB plans will crash.
+    plan: standard
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: SITE_PASSWORD
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        value: https://hvhagxhcaivmgvgirygo.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

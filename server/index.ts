@@ -6,8 +6,13 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import app from './app.ts'
 import { authRequired } from './auth.ts'
+import { cloudInfo, restoreFiles, startCloud } from './cloud.ts'
 import { env, ffmpegPath, ROOT } from './env.ts'
 import { llmReady } from './llm.ts'
+
+// With Supabase configured, bring the saved footage, audio and renders back onto this disk first.
+await restoreFiles()
+startCloud()
 
 const server = createServer(app)
 if (env.prod && existsSync(join(ROOT, 'dist', 'index.html'))) {
@@ -24,7 +29,7 @@ if (env.prod && existsSync(join(ROOT, 'dist', 'index.html'))) {
 server.listen(env.port, env.host, () => {
   console.log(`\n  Reel Studio is running at http://localhost:${env.port}   (listening on ${env.host})\n`)
   console.log(`  Claude: ${llmReady() ? 'key set' : 'no key (template stories and scripts)'}   ElevenLabs: ${env.elevenKey ? 'key set' : 'no key (free voices only)'}   ffmpeg: ${ffmpegPath() ? 'ready' : 'missing, run `npm run setup`'}`)
-  console.log(`  Password gate: ${authRequired ? 'on' : 'off (set SITE_PASSWORD to turn it on)'}\n`)
+  console.log(`  Password gate: ${authRequired ? 'on' : 'off (set SITE_PASSWORD to turn it on)'}   Supabase: ${cloudInfo() ? 'on' : 'off (data stays on this disk)'}\n`)
 })
 server.on('error', (e: NodeJS.ErrnoException) => {
   console.error(e.code === 'EADDRINUSE' ? `Port ${env.port} is already in use. Set PORT in .env or stop the other process.` : e)

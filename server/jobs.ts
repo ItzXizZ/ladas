@@ -1,6 +1,7 @@
 // Long-running pipeline stages run as jobs the UI polls for progress.
 import type { Job } from '../shared/types.ts'
 import { newId } from '../shared/starter.ts'
+import { scheduleFileSync } from './cloud.ts'
 
 const jobs = new Map<string, Job>()
 
@@ -26,6 +27,7 @@ export function startJob<T>(kind: string, run: (h: JobHandle) => Promise<T>): Jo
     },
   }
   run(handle)
+    .finally(() => scheduleFileSync())
     .then((result) => {
       job.status = 'done'
       job.progress = 1

@@ -22,6 +22,7 @@ export const env = {
   port: Number(clean(process.env.PORT)) || 5173,
   host: clean(process.env.HOST) || '127.0.0.1',
   browserChannel: clean(process.env.BROWSER_CHANNEL),
+  chromePath: clean(process.env.CHROME_PATH),
   prod: process.argv.includes('--prod'),
 }
 

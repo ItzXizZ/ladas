@@ -6,6 +6,12 @@ import { env } from './env.ts'
 let working: string | null | undefined
 
 export async function launchBrowser(): Promise<Browser> {
+  // A container ships its own Chromium; CHROME_PATH points at it. There is no sandbox support inside a container.
+  if (env.chromePath) {
+    const browser = await chromium.launch({ executablePath: env.chromePath, headless: true, args: ['--force-color-profile=srgb', '--hide-scrollbars', '--no-sandbox', '--disable-dev-shm-usage'] })
+    working = 'chromium'
+    return browser
+  }
   const channels = [env.browserChannel, working ?? '', 'chrome', 'msedge', 'chromium'].filter((c, i, a) => c && a.indexOf(c) === i)
   let last: unknown
   for (const channel of channels) {

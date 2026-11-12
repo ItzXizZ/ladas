@@ -9,6 +9,7 @@ import { browserName } from './browser.ts'
 import { describeCharacter, sanitizeCharacter } from './characters.ts'
 import { mixIsCurrent } from './audio/mix.ts'
 import { authRoutes, requireAuth } from './auth.ts'
+import { scheduleFileSync } from './cloud.ts'
 import { ensureDir, env, ffmpegPath, filePath, fileUrl, FILES } from './env.ts'
 import { ingestProduct, linkFeatures, normalizeUrl } from './ingest.ts'
 import { getJob, startJob } from './jobs.ts'
@@ -26,6 +27,11 @@ app.use(express.json({ limit: '4mb' }))
 app.get('/healthz', (_req, res) => { res.json({ ok: true }) })
 app.use(authRoutes)
 app.use('/api', requireAuth)
+// Anything that changes data may have written or removed files (photos, covers); mirror them soon after.
+app.use('/api', (req, res, next) => {
+  if (req.method !== 'GET') res.on('finish', () => scheduleFileSync())
+  next()
+})
 app.use('/files', requireAuth, express.static(FILES, { maxAge: '1h' }))
 
 class HttpError extends Error {

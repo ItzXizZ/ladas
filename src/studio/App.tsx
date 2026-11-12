@@ -63,7 +63,7 @@ export function App() {
         <aside className="side">
           <button className="brand" onClick={() => go('/')}>
             <span className="brand-mark" aria-hidden><i /><i /><i /></span>
-            <span>Reel<br />Studio</span>
+            <span>Ladas</span>
           </button>
           <nav>
             {nav.map((n) => (
